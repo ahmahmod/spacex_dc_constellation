@@ -1,6 +1,7 @@
 python3 -m venv .venv
 source .venv/bin/activate
 
+# pip install --upgrade pip
 pip install -r requirements.txt
 
 python generate.py \
@@ -13,4 +14,7 @@ python generate.py \
   --duration 3600 \
   --dt 30 \
   --terminals 4 \
-  --output output/odc600
+  --output output/circular \
+  --propagator circular
+
+rm -rf .venv

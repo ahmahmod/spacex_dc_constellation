@@ -141,6 +141,20 @@ def run(a):
         provenance='Synthetic Walker slice constrained by ODC filing altitude and inclination envelope; not an actual SpaceX design'
     if not (a.dt>0 and a.duration>0 and a.terminals>0 and a.rate_gbps>0 and a.max_range_km>0):raise ValueError('all time, terminal, rate and range parameters must be positive')
     nodes=construct(n,p,h,inc,phase,walker)
+
+    if a.propagator=='sgp4':
+        from orbit_sgp4 import (
+            build_sgp4_satellites,
+            sgp4_positions
+        )
+
+        epoch = datetime(
+            2026, 10, 22,
+            tzinfo=timezone.utc
+        )
+
+        satellites = build_sgp4_satellites(nodes, epoch)
+
     out=Path(a.output);out.mkdir(parents=True,exist_ok=True)
     write_csv(out/'satellites.csv',list(nodes[0]),nodes)
 
@@ -156,16 +170,50 @@ def run(a):
     candidate_rows=[];scheduled_rows=[]
     
     
-    def update(active,now,current,rows):
-        for k,old in list(active.items()):
+
+    def update(active, now, current, rows,
+            track_distance=True):
+
+        def close_interval(k, old):
+            rows.append({
+                'src': nodes[k[0]]['sat_id'],
+                'dst': nodes[k[1]]['sat_id'],
+                't_start_s': old[0],
+                't_end_s': now,
+                'rate_bps': int(a.rate_gbps * 1e9),
+                'prop_delay_ms': round(
+                    old[1] / C * 1000, 5
+                ),
+                'distance_km': round(old[1], 4)
+            })
+
+        # Close links that disappeared or whose
+        # propagation delay needs updating.
+        for k, old in list(active.items()):
             if k not in current:
-                rows.append({'src':nodes[k[0]]['sat_id'],'dst':nodes[k[1]]['sat_id'],'t_start_s':old[0],'t_end_s':now,'rate_bps':int(a.rate_gbps*1e9),'prop_delay_ms':round(old[1]/C*1000,5),'distance_km':round(old[1],4)})
+                close_interval(k, old)
                 del active[k]
-        for k,d in current.items():
-            if k not in active:active[k]=(now,d)
+
+            elif track_distance:
+                new_distance = current[k]
+                old_distance = old[1]
+
+                if abs(new_distance - old_distance) > 1e-6:
+                    close_interval(k, old)
+                    active[k] = (now, new_distance)
+
+        # Start newly active links.
+        for k, d in current.items():
+            if k not in active:
+                active[k] = (now, d)
+
     
     for step in range(steps):
-        t=step*a.dt; xyz=positions(nodes,t)
+        t=step*a.dt; 
+        if a.propagator=='sgp4':
+            xyz = sgp4_positions(satellites, epoch, t)
+        else:
+            xyz=positions(nodes,t)
         for nd,pos in zip(nodes,xyz):pw.writerow({'time_s':round(t,6),'sat_id':nd['sat_id'],'x_km':round(pos[0],5),'y_km':round(pos[1],5),'z_km':round(pos[2],5)})
         edges=list(feasible_edges(xyz,a.max_range_km))
         all_contacts={(i,j):d for i,j,d in edges}
@@ -177,7 +225,7 @@ def run(a):
             if key not in previous:previous[key]=step
         previous={k:previous[k] for k in selected}
         operational={k:d for k,d in selected.items() if step-previous[k]>=math.ceil(a.acquisition_s/a.dt)}
-        update(active_schedule,t,operational,scheduled_rows)
+        update(active_schedule,t,operational,scheduled_rows, track_distance=True)
         if a.verbose:print(f't={t:g}s candidates={len(edges)} scheduled={len(selected)} ready={len(operational)}')
     
     
@@ -227,4 +275,5 @@ if __name__=='__main__':
     ap.add_argument('--rate-gbps',type=float,default=10)
     ap.add_argument('--output',default='output')
     ap.add_argument('--verbose',action='store_true')
+    ap.add_argument('--propagator', choices=['circular','sgp4'],default='circular',help='orbital two-body propagator; SGP4 is more accurate but slower')
     run(ap.parse_args())
